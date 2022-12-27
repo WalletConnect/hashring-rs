@@ -9,8 +9,8 @@
 // copies of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
 
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
 
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -31,17 +31,21 @@
 //! ## Example
 //!
 //! Below is a simple example of how an application might use `HashRing` to make
-//! use of consistent hashing. Since `HashRing` exposes only a minimal API clients
-//! can build other abstractions, such as virtual nodes, on top of it. The example
-//! below shows one potential implementation of virtual nodes on top of `HashRing`
+//! use of consistent hashing. Since `HashRing` exposes only a minimal API
+//! clients can build other abstractions, such as virtual nodes, on top of it.
+//! The example below shows one potential implementation of virtual nodes on top
+//! of `HashRing`
 //!
 //! ``` rust,no_run
 //! extern crate hashring;
 //!
-//! use std::net::{IpAddr, SocketAddr};
-//! use std::str::FromStr;
-//!
-//! use hashring::HashRing;
+//! use {
+//!     hashring::HashRing,
+//!     std::{
+//!         net::{IpAddr, SocketAddr},
+//!         str::FromStr,
+//!     },
+//! };
 //!
 //! #[derive(Debug, Copy, Clone, Hash, PartialEq)]
 //! struct VNode {
@@ -52,10 +56,7 @@
 //! impl VNode {
 //!     fn new(ip: &str, port: u16, id: usize) -> Self {
 //!         let addr = SocketAddr::new(IpAddr::from_str(&ip).unwrap(), port);
-//!         VNode {
-//!             id: id,
-//!             addr: addr,
-//!         }
+//!         VNode { id, addr }
 //!     }
 //! }
 //!
@@ -71,21 +72,34 @@
 //!     nodes.push(VNode::new("127.0.0.3", 1024, 1));
 //!
 //!     for node in nodes {
-//!         ring.add(node);
+//!         ring.add(node).unwrap();
 //!     }
 //!
-//!     println!("{:?}", ring.get(&"foo"));
-//!     println!("{:?}", ring.get(&"bar"));
-//!     println!("{:?}", ring.get(&"baz"));
+//!     println!("{:?}", ring.get_by_hash(&"foo").unwrap().data());
+//!     println!("{:?}", ring.get_by_hash(&"bar").unwrap().data());
+//!     println!("{:?}", ring.get_by_hash(&"baz").unwrap().data());
 //! }
 //! ```
 
 extern crate siphasher;
 
-use siphasher::sip::SipHasher;
-use std::cmp::Ordering;
-use std::hash::BuildHasher;
-use std::hash::{Hash, Hasher};
+use {
+    siphasher::sip::SipHasher,
+    std::{
+        cmp::Ordering,
+        hash::{BuildHasher, Hash, Hasher},
+        ops::Range,
+    },
+};
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum Error {
+    #[error("Duplicate node")]
+    DuplicateNode,
+
+    #[error("Node not found")]
+    NodeNotFound,
+}
 
 pub struct DefaultHashBuilder;
 
@@ -97,17 +111,17 @@ impl BuildHasher for DefaultHashBuilder {
     }
 }
 
-// Node is an internal struct used to encapsulate the nodes that will be added and
-// removed from `HashRing`
+// Node is an internal struct used to encapsulate the nodes that will be added
+// and removed from `HashRing`
 #[derive(Debug)]
 struct Node<T> {
     key: u64,
-    node: T,
+    data: T,
 }
 
 impl<T> Node<T> {
-    fn new(key: u64, node: T) -> Node<T> {
-        Node { key, node }
+    fn new(key: u64, data: T) -> Node<T> {
+        Node { key, data }
     }
 }
 
@@ -134,14 +148,14 @@ impl<T> Ord for Node<T> {
 
 pub struct HashRing<T, S = DefaultHashBuilder> {
     hash_builder: S,
-    ring: Vec<Node<T>>,
+    data: Vec<Node<T>>,
 }
 
 impl<T> Default for HashRing<T> {
     fn default() -> Self {
         HashRing {
             hash_builder: DefaultHashBuilder,
-            ring: Vec::new(),
+            data: Vec::new(),
         }
     }
 }
@@ -161,62 +175,198 @@ impl<T, S> HashRing<T, S> {
     pub fn with_hasher(hash_builder: S) -> HashRing<T, S> {
         HashRing {
             hash_builder,
-            ring: Vec::new(),
+            data: Vec::new(),
         }
     }
 
     /// Get the number of nodes in the hash ring.
+    #[inline]
     pub fn len(&self) -> usize {
-        self.ring.len()
+        self.data.len()
     }
 
     /// Returns true if the ring has no elements.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.ring.len() == 0
+        self.data.len() == 0
     }
 }
 
 impl<T: Hash, S: BuildHasher> HashRing<T, S> {
-    /// Add `node` to the hash ring.
-    pub fn add(&mut self, node: T) {
-        let key = get_key(&self.hash_builder, &node);
-        self.ring.push(Node::new(key, node));
-        self.ring.sort();
+    /// Hashes `data` and returns its key into the hash ring.
+    #[inline]
+    pub fn key<U: Hash>(&self, data: &U) -> u64 {
+        get_key(&self.hash_builder, data)
     }
 
-    /// Remove `node` from the hash ring. Returns an `Option` that will contain the `node`
-    /// if it was in the hash ring or `None` if it was not present.
-    pub fn remove(&mut self, node: &T) -> Option<T> {
-        let key = get_key(&self.hash_builder, node);
-        match self.ring.binary_search_by(|node| node.key.cmp(&key)) {
-            Err(_) => None,
-            Ok(n) => Some(self.ring.remove(n).node),
-        }
-    }
+    /// Adds `node` to the hash ring. Returns the new node's index, or an error
+    /// if the hash ring already contains the node.
+    pub fn add_node(&mut self, node: T) -> Result<usize, Error> {
+        let key = self.key(&node);
 
-    /// Get the node responsible for `key`. Returns an `Option` that will contain the `node`
-    /// if the hash ring is not empty or `None` if it was empty.
-    pub fn get<U: Hash>(&self, key: &U) -> Option<&T> {
-        if self.ring.is_empty() {
-            return None;
-        }
-
-        let k = get_key(&self.hash_builder, key);
-        let n = match self.ring.binary_search_by(|node| node.key.cmp(&k)) {
-            Err(n) => n,
-            Ok(n) => n,
+        let Err(index) = self.find_node(key) else {
+            return Err(Error::DuplicateNode);
         };
 
-        if n == self.ring.len() {
-            return Some(&self.ring[0].node);
+        self.data.insert(index, Node::new(key, node));
+
+        Ok(index)
+    }
+
+    /// Removes `node` from the hash ring. Returns an `Error` if the hash ring
+    /// does not contain the `node`.
+    pub fn remove_node(&mut self, node: &T) -> Result<(), Error> {
+        let key = self.key(node);
+
+        self.find_node(key)
+            .map(|idx| {
+                self.data.remove(idx);
+            })
+            .map_err(|_| Error::NodeNotFound)
+    }
+
+    /// Returns the `NodeRef` for the node containing `key`, or an error if the
+    /// hash ring is empty.
+    #[inline]
+    pub fn get_by_hash<U: Hash>(&self, key: &U) -> Result<NodeRef<'_, T, S>, Error> {
+        self.get_by_key(self.key(key))
+    }
+
+    /// Returns the `NodeRef` for the node containing `key`, or an error if the
+    /// hash ring is empty.
+    #[inline]
+    pub fn get_by_key(&self, key: u64) -> Result<NodeRef<'_, T, S>, Error> {
+        if self.data.is_empty() {
+            return Err(Error::NodeNotFound);
         }
 
-        Some(&self.ring[n].node)
+        let index = match self.find_node(key) {
+            Err(index) => index,
+            Ok(index) => index,
+        };
+
+        let index = if index == self.data.len() { 0 } else { index };
+
+        self.get_by_index(index)
+    }
+
+    /// Returns the `NodeRef` by node index within the hash ring, or an error if
+    /// the hash ring is empty.
+    #[inline]
+    pub fn get_by_index(&self, index: usize) -> Result<NodeRef<'_, T, S>, Error> {
+        if index < self.len() {
+            Ok(NodeRef { ring: self, index })
+        } else {
+            Err(Error::NodeNotFound)
+        }
+    }
+
+    /// Searches the ring for `node` and returns its `NodeRef`, or an error if
+    /// the node is not found.
+    #[inline]
+    pub fn node(&self, node: &T) -> Result<NodeRef<'_, T, S>, Error> {
+        if self.data.is_empty() {
+            return Err(Error::NodeNotFound);
+        }
+
+        let key = self.key(node);
+
+        let Ok(index) = self.find_node(key) else {
+            return Err(Error::NodeNotFound);
+        };
+
+        self.get_by_index(index)
+    }
+
+    /// Internal method for traversing the hash ring.
+    #[inline]
+    fn find_node(&self, key: u64) -> Result<usize, usize> {
+        self.data.binary_search_by(|node| node.key.cmp(&key))
+    }
+
+    /// Internal method for wrapping node index within the hash ring.
+    #[inline]
+    fn wrap_index(&self, index: usize) -> usize {
+        index % self.data.len()
     }
 }
 
-// An internal function for converting a reference to a hashable type into a `u64` which
-// can be used as a key in the hash ring.
+/// Reference to a hash ring node. Acts as an iterator (using `prev()` and
+/// `next()` methods), and provides additional node data like range and hash
+/// key.
+#[derive(Clone)]
+pub struct NodeRef<'a, T, S> {
+    ring: &'a HashRing<T, S>,
+    index: usize,
+}
+
+impl<'a, T, S> std::fmt::Debug for NodeRef<'a, T, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeRef")
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, T, S> NodeRef<'a, T, S>
+where
+    T: Hash,
+    S: BuildHasher,
+{
+    /// Returns the node's hash key.
+    #[inline]
+    pub fn key(&self) -> u64 {
+        self.node().key
+    }
+
+    /// Returns the node's data.
+    #[inline]
+    pub fn data(&self) -> &T {
+        &self.node().data
+    }
+
+    /// Returns the previous node on the hash ring. If the hash ring contains
+    /// only one node, the returned reference will be for the same node.
+    #[inline]
+    pub fn prev(&self) -> Self {
+        let ring = self.ring;
+
+        Self {
+            ring,
+            index: ring.wrap_index(ring.len() + self.index - 1),
+        }
+    }
+
+    /// Returns the next node on the hash ring. If the hash ring contains
+    /// only one node, the returned reference will be for the same node.
+    #[inline]
+    pub fn next(&self) -> Self {
+        let ring = self.ring;
+
+        Self {
+            ring,
+            index: ring.wrap_index(self.index + 1),
+        }
+    }
+
+    /// Returns the nodes range on the hash ring.
+    #[inline]
+    pub fn range(&self) -> Range<u64> {
+        Range {
+            start: self.key(),
+            end: self.next().key(),
+        }
+    }
+
+    #[inline]
+    fn node(&self) -> &Node<T> {
+        // Safe unwrap, since the node ref would not exist otherwise.
+        self.ring.data.get(self.index).unwrap()
+    }
+}
+
+// An internal function for converting a reference to a hashable type into a
+// `u64` which can be used as a key in the hash ring.
 fn get_key<S, T>(hash_builder: &S, input: T) -> u64
 where
     S: BuildHasher,
@@ -227,12 +377,32 @@ where
     hasher.finish()
 }
 
+pub trait RangeExt<T> {
+    /// Similar to the `Range::contains()` method, but accounts for wrapping
+    /// ranges where `start > end`, e.g. `(15, 10)`.
+    fn contains_wrapped(&self, val: &T) -> bool;
+}
+
+impl<T: PartialOrd<T>> RangeExt<T> for Range<T> {
+    fn contains_wrapped(&self, item: &T) -> bool {
+        if self.is_empty() {
+            (&self.start..).contains(&item) || (..&self.end).contains(&item)
+        } else {
+            self.contains(item)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, SocketAddr};
-    use std::str::FromStr;
-
-    use super::HashRing;
+    use {
+        super::HashRing,
+        std::{
+            net::{IpAddr, SocketAddr},
+            ops::Range,
+            str::FromStr,
+        },
+    };
 
     #[derive(Debug, Copy, Clone, Hash, PartialEq)]
     struct VNode {
@@ -258,26 +428,26 @@ mod tests {
         let vnode2 = VNode::new("127.0.0.1", 1024, 2);
         let vnode3 = VNode::new("127.0.0.2", 1024, 1);
 
-        ring.add(vnode1);
-        ring.add(vnode2);
-        ring.add(vnode3);
+        ring.add_node(vnode1).unwrap();
+        ring.add_node(vnode2).unwrap();
+        ring.add_node(vnode3).unwrap();
         assert_eq!(ring.len(), 3);
         assert!(!ring.is_empty());
 
-        assert_eq!(ring.remove(&vnode2).unwrap(), vnode2);
+        ring.remove_node(&vnode2).unwrap();
         assert_eq!(ring.len(), 2);
 
         let vnode4 = VNode::new("127.0.0.2", 1024, 2);
         let vnode5 = VNode::new("127.0.0.2", 1024, 3);
         let vnode6 = VNode::new("127.0.0.3", 1024, 1);
 
-        ring.add(vnode4);
-        ring.add(vnode5);
-        ring.add(vnode6);
+        ring.add_node(vnode4).unwrap();
+        ring.add_node(vnode5).unwrap();
+        ring.add_node(vnode6).unwrap();
 
-        assert_eq!(ring.remove(&vnode1).unwrap(), vnode1);
-        assert_eq!(ring.remove(&vnode3).unwrap(), vnode3);
-        assert_eq!(ring.remove(&vnode6).unwrap(), vnode6);
+        ring.remove_node(&vnode1).unwrap();
+        ring.remove_node(&vnode3).unwrap();
+        ring.remove_node(&vnode6).unwrap();
         assert_eq!(ring.len(), 2);
     }
 
@@ -285,7 +455,10 @@ mod tests {
     fn get_nodes() {
         let mut ring: HashRing<VNode> = HashRing::new();
 
-        assert_eq!(ring.get(&"foo"), None);
+        assert!(matches!(
+            ring.get_by_hash(&"foo"),
+            Err(super::Error::NodeNotFound)
+        ));
 
         let vnode1 = VNode::new("127.0.0.1", 1024, 1);
         let vnode2 = VNode::new("127.0.0.1", 1024, 2);
@@ -294,29 +467,30 @@ mod tests {
         let vnode5 = VNode::new("127.0.0.2", 1024, 3);
         let vnode6 = VNode::new("127.0.0.3", 1024, 1);
 
-        ring.add(vnode1);
-        ring.add(vnode2);
-        ring.add(vnode3);
-        ring.add(vnode4);
-        ring.add(vnode5);
-        ring.add(vnode6);
+        ring.add_node(vnode1).unwrap();
+        ring.add_node(vnode2).unwrap();
+        ring.add_node(vnode3).unwrap();
+        ring.add_node(vnode4).unwrap();
+        ring.add_node(vnode5).unwrap();
+        ring.add_node(vnode6).unwrap();
 
-        assert_eq!(ring.get(&"foo"), Some(&vnode3));
-        assert_eq!(ring.get(&"bar"), Some(&vnode2));
-        assert_eq!(ring.get(&"baz"), Some(&vnode6));
+        assert_eq!(ring.get_by_hash(&"foo").unwrap().data(), &vnode5);
+        assert_eq!(ring.get_by_hash(&"bar").unwrap().data(), &vnode3);
+        assert_eq!(ring.get_by_hash(&"baz").unwrap().data(), &vnode5);
 
-        assert_eq!(ring.get(&"abc"), Some(&vnode6));
-        assert_eq!(ring.get(&"def"), Some(&vnode6));
-        assert_eq!(ring.get(&"ghi"), Some(&vnode3));
+        assert_eq!(ring.get_by_hash(&"abc").unwrap().data(), &vnode2);
+        assert_eq!(ring.get_by_hash(&"def").unwrap().data(), &vnode2);
+        assert_eq!(ring.get_by_hash(&"ghi").unwrap().data(), &vnode6);
 
-        assert_eq!(ring.get(&"cat"), Some(&vnode1));
-        assert_eq!(ring.get(&"dog"), Some(&vnode6));
-        assert_eq!(ring.get(&"bird"), Some(&vnode3));
+        assert_eq!(ring.get_by_hash(&"cat").unwrap().data(), &vnode1);
+        assert_eq!(ring.get_by_hash(&"dog").unwrap().data(), &vnode5);
+        assert_eq!(ring.get_by_hash(&"bird").unwrap().data(), &vnode5);
 
         // at least each node as a key
         let mut nodes = vec![0; 6];
         for x in 0..50_000 {
-            let node = ring.get(&x).unwrap();
+            let node = ring.get_by_hash(&x).unwrap();
+            let node = node.data();
             if vnode1 == *node {
                 nodes[0] += 1;
             }
@@ -338,5 +512,139 @@ mod tests {
         }
         println!("{:?}", nodes);
         assert!(nodes.iter().all(|x| *x != 0));
+    }
+
+    #[test]
+    fn advanced() {
+        let mut ring: HashRing<VNode> = HashRing::new();
+
+        let vnode1 = VNode::new("127.0.0.1", 1024, 1);
+        let vnode2 = VNode::new("127.0.0.1", 1024, 2);
+
+        // Ok: no nodes were affected.
+        let result = ring.add_node(vnode1).unwrap();
+        assert_eq!(result, 0);
+        let vnode1_prev_range = ring.get_by_hash(&vnode1).unwrap().range();
+
+        // Error: duplicates are not allowed.
+        let result = ring.add_node(vnode1);
+        assert_eq!(result.unwrap_err(), super::Error::DuplicateNode);
+
+        let result = ring.add_node(vnode2).unwrap();
+        assert_eq!(result, 1);
+        let vnode1_curr_range = ring.get_by_hash(&vnode1).unwrap().range();
+
+        let vnode2_curr_range = ring.get_by_hash(&vnode2).unwrap().range();
+
+        assert_eq!(vnode1_prev_range.start, vnode1_curr_range.start);
+        assert_eq!(vnode1_prev_range.end, vnode2_curr_range.end);
+        assert_eq!(vnode1_curr_range.end, vnode2_curr_range.start);
+    }
+
+    #[test]
+    fn node_ref() {
+        let mut ring: HashRing<VNode> = HashRing::new();
+
+        let vnode1 = VNode::new("127.0.0.1", 1024, 1);
+        let vnode2 = VNode::new("127.0.0.1", 1024, 2);
+
+        assert!(matches!(
+            ring.get_by_hash(&vnode1),
+            Err(super::Error::NodeNotFound)
+        ));
+
+        ring.add_node(vnode1).unwrap();
+
+        let node_ref = ring.get_by_hash(&vnode1).unwrap();
+        assert_eq!(node_ref.data(), &vnode1);
+        assert_eq!(node_ref.index, 0);
+        assert_eq!(node_ref.prev().index, 0);
+        assert_eq!(node_ref.next().index, 0);
+
+        ring.add_node(vnode2).unwrap();
+
+        let node_ref = ring.get_by_hash(&vnode2).unwrap();
+        assert_eq!(node_ref.data(), &vnode2);
+        assert_eq!(node_ref.prev().data(), &vnode1);
+        assert_eq!(node_ref.next().data(), &vnode1);
+    }
+
+    #[test]
+    fn range_ext() {
+        use super::RangeExt;
+
+        let range = Range { start: 10, end: 5 };
+
+        assert!(!range.contains_wrapped(&5));
+        assert!(!range.contains_wrapped(&7));
+        assert!(!range.contains_wrapped(&9));
+        assert!(range.contains_wrapped(&0));
+        assert!(range.contains_wrapped(&4));
+        assert!(range.contains_wrapped(&10));
+        assert!(range.contains_wrapped(&u64::MAX));
+
+        let range = Range { start: 5, end: 10 };
+
+        assert!(range.contains_wrapped(&5));
+        assert!(range.contains_wrapped(&7));
+        assert!(range.contains_wrapped(&9));
+        assert!(!range.contains_wrapped(&0));
+        assert!(!range.contains_wrapped(&4));
+        assert!(!range.contains_wrapped(&10));
+        assert!(!range.contains_wrapped(&u64::MAX));
+    }
+
+    #[test]
+    fn node_range() {
+        // One node.
+        {
+            let mut ring: HashRing<VNode> = HashRing::new();
+            let node = VNode::new("127.0.0.1", 1024, 1);
+            let node_key = super::get_key(&ring.hash_builder, &node);
+
+            ring.add_node(node).unwrap();
+
+            let range = ring.get_by_hash(&node).unwrap().range();
+            assert_eq!(range, Range {
+                start: node_key,
+                end: node_key
+            });
+        }
+
+        // Multiple nodes.
+        {
+            let mut ring: HashRing<VNode> = HashRing::new();
+            let node1 = VNode::new("127.0.0.1", 1024, 1);
+            let node2 = VNode::new("127.0.0.1", 1024, 2);
+            let node_key1 = super::get_key(&ring.hash_builder, &node1);
+            let node_key2 = super::get_key(&ring.hash_builder, &node2);
+
+            ring.add_node(node1).unwrap();
+            ring.add_node(node2).unwrap();
+
+            let range = ring.get_by_hash(&node1).unwrap().range();
+            assert_eq!(range, Range {
+                start: node_key1,
+                end: node_key2
+            });
+
+            let range = ring.get_by_hash(&node2).unwrap().range();
+            assert_eq!(range, Range {
+                start: node_key2,
+                end: node_key1
+            });
+        }
+
+        // Invalid node.
+        {
+            let mut ring: HashRing<VNode> = HashRing::new();
+            let node1 = VNode::new("127.0.0.1", 1024, 1);
+            let node2 = VNode::new("127.0.0.1", 1024, 2);
+
+            ring.add_node(node1).unwrap();
+
+            let result = ring.node(&node2);
+            assert!(matches!(result, Err(super::Error::NodeNotFound)));
+        }
     }
 }
