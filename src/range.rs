@@ -120,6 +120,16 @@ impl<Idx: Debug> Debug for KeyRange<Idx> {
     }
 }
 
+impl KeyRange<u64> {
+    pub fn size(&self) -> u64 {
+        if self.is_wrapping() {
+            u64::MAX - (self.start - self.end)
+        } else {
+            self.end - self.start
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +345,16 @@ mod tests {
 
             assert_eq!(r1, KeyRange::new(5, 10));
         }
+    }
+
+    #[test]
+    fn size() {
+        // Wrapping ranges.
+        assert_eq!(KeyRange::new(0, 0).size(), u64::MAX);
+        assert_eq!(KeyRange::new(10, 10).size(), u64::MAX);
+        assert_eq!(KeyRange::new(10, 9).size(), u64::MAX - 1);
+
+        // Regular ranges.
+        assert_eq!(KeyRange::new(5, 10).size(), 5);
     }
 }

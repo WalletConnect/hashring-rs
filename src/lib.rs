@@ -666,7 +666,7 @@ mod tests {
         ring.add_node(node2.clone()).unwrap();
         ring.add_node(node3.clone()).unwrap();
 
-        let mut iter = ring.iter(Some(&ring.key(&node2)));
+        let mut iter = ring.iter(Some(ring.key(&node2)));
 
         assert_eq!(iter.next().unwrap().data(), &node2);
         assert_eq!(iter.next().unwrap().data(), &node3);
