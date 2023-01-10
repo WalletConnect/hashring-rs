@@ -98,13 +98,14 @@ pub enum Error {
     NodeNotFound,
 }
 
-pub trait RingHasher: BuildHasher {
+pub trait RingHasher: BuildHasher + Clone {
     type Key: Clone + PartialEq + Eq + PartialOrd + Ord;
 
     fn get_key<T: Hash>(&self, input: T) -> Self::Key;
 }
 
 /// Default hash builder. Based on `SipHasher`, which produces 64-bit hashes.
+#[derive(Clone)]
 pub struct DefaultHashBuilder;
 
 impl BuildHasher for DefaultHashBuilder {
@@ -130,7 +131,7 @@ impl RingHasher for DefaultHashBuilder {
 
 /// Node is an internal struct used to encapsulate the nodes that will be added
 /// and removed from `HashRing`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node<K, T> {
     key: K,
     data: T,
@@ -142,6 +143,7 @@ impl<K, T> Node<K, T> {
     }
 }
 
+#[derive(Clone)]
 pub struct HashRing<T, S: RingHasher = DefaultHashBuilder> {
     hash_builder: S,
     data: Vec<Node<S::Key, T>>,
@@ -276,6 +278,16 @@ where
         self.get_by_index(index)
     }
 
+    pub fn iter(&self, start: impl Into<Option<S::Key>>) -> Iter<'_, T, S> {
+        let start_node = if let Some(start_key) = start.into() {
+            self.get_by_key(&start_key)
+        } else {
+            self.get_by_index(0)
+        };
+
+        start_node.map(Iter::new).unwrap_or(Iter::empty())
+    }
+
     /// Internal method for traversing the hash ring.
     #[inline]
     fn find_node(&self, key: &S::Key) -> Result<usize, usize> {
@@ -360,6 +372,53 @@ where
     fn node(&self) -> &Node<S::Key, T> {
         // Safe unwrap, since the node ref would not exist otherwise.
         self.ring.data.get(self.index).unwrap()
+    }
+}
+
+pub struct Iter<'a, T, S: RingHasher> {
+    start: usize,
+    next: Option<NodeRef<'a, T, S>>,
+}
+
+impl<'a, T, S> Iter<'a, T, S>
+where
+    T: Hash,
+    S: RingHasher,
+{
+    pub fn new(node: NodeRef<'a, T, S>) -> Self {
+        Self {
+            start: node.index,
+            next: Some(node),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            start: 0,
+            next: None,
+        }
+    }
+}
+
+impl<'a, T, S> Iterator for Iter<'a, T, S>
+where
+    T: Hash,
+    S: RingHasher,
+{
+    type Item = NodeRef<'a, T, S>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.next.take();
+
+        if let Some(current) = &current {
+            let next = current.next();
+
+            if next.index != self.start {
+                self.next = Some(next);
+            }
+        }
+
+        current
     }
 }
 
@@ -590,5 +649,28 @@ mod tests {
             let result = ring.node(&node2);
             assert!(matches!(result, Err(super::Error::NodeNotFound)));
         }
+    }
+
+    #[test]
+    fn iter() {
+        let node1 = VNode::new("127.0.0.1", 1024, 1);
+        let node2 = VNode::new("127.0.0.1", 1024, 2);
+        let node3 = VNode::new("127.0.0.1", 1024, 3);
+
+        let mut ring: HashRing<VNode> = HashRing::new();
+        assert!(ring.iter(None).next().is_none());
+
+        ring.add_node(node1.clone()).unwrap();
+        assert_eq!(ring.iter(None).next().unwrap().data(), &node1);
+
+        ring.add_node(node2.clone()).unwrap();
+        ring.add_node(node3.clone()).unwrap();
+
+        let mut iter = ring.iter(Some(&ring.key(&node2)));
+
+        assert_eq!(iter.next().unwrap().data(), &node2);
+        assert_eq!(iter.next().unwrap().data(), &node3);
+        assert_eq!(iter.next().unwrap().data(), &node1);
+        assert!(iter.next().is_none());
     }
 }
