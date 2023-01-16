@@ -12,6 +12,7 @@ pub use merge::*;
 ///
 /// If `start >= end`, the range is considered wrapping and is equivalent to
 /// covering two ranges: `(..end)` and `(start..)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyRange<Idx> {
     pub start: Idx,
     pub end: Idx,
@@ -90,33 +91,6 @@ impl<Idx> From<Range<Idx>> for KeyRange<Idx> {
             start: value.start,
             end: value.end,
         }
-    }
-}
-
-impl<Idx: Clone> Clone for KeyRange<Idx> {
-    fn clone(&self) -> Self {
-        Self {
-            start: self.start.clone(),
-            end: self.end.clone(),
-        }
-    }
-}
-
-impl<Idx: PartialEq> PartialEq for KeyRange<Idx> {
-    fn eq(&self, other: &Self) -> bool {
-        self.start.eq(&other.start) && self.end.eq(&other.end)
-    }
-}
-
-impl<Idx: Debug> Debug for KeyRange<Idx> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(
-            &Range {
-                start: &self.start,
-                end: &self.end,
-            },
-            f,
-        )
     }
 }
 

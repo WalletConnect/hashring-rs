@@ -131,7 +131,7 @@ impl RingHasher for DefaultHashBuilder {
 
 /// Node is an internal struct used to encapsulate the nodes that will be added
 /// and removed from `HashRing`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Node<K, T> {
     key: K,
     data: T,
@@ -211,6 +211,19 @@ where
         self.data.insert(index, Node::new(key, node));
 
         Ok(index)
+    }
+
+    /// Similar to `add_node()`, but doesn't check for duplicate nodes, and
+    /// requires to be sorted after all of the nodes are added.
+    pub fn add_node_unchecked(&mut self, node: T) {
+        let key = self.key(&node);
+        self.data.push(Node::new(key, node));
+    }
+
+    /// Sorts the ring. This is required after adding nodes with
+    /// `add_node_unchecked()`.
+    pub fn sort(&mut self) {
+        self.data.sort_by(|a, b| a.key.cmp(&b.key))
     }
 
     /// Removes `node` from the hash ring. Returns an `Error` if the hash ring
@@ -672,5 +685,25 @@ mod tests {
         assert_eq!(iter.next().unwrap().data(), &node3);
         assert_eq!(iter.next().unwrap().data(), &node1);
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn add_node_unchecked() {
+        let node1 = VNode::new("127.0.0.1", 1024, 3);
+        let node2 = VNode::new("127.0.0.1", 1024, 2);
+        let node3 = VNode::new("127.0.0.1", 1024, 1);
+
+        let mut ring1 = HashRing::new();
+        ring1.add_node(node1.clone()).unwrap();
+        ring1.add_node(node2.clone()).unwrap();
+        ring1.add_node(node3.clone()).unwrap();
+
+        let mut ring2 = HashRing::new();
+        ring2.add_node_unchecked(node1.clone());
+        ring2.add_node_unchecked(node2.clone());
+        ring2.add_node_unchecked(node3.clone());
+        ring2.sort();
+
+        assert_eq!(ring1.data, ring2.data);
     }
 }
