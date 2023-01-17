@@ -15,5 +15,6 @@ edition = "2021"
 nightly = []
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 siphasher = "0.3"
 thiserror = "1.0"

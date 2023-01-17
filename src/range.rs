@@ -1,6 +1,9 @@
-use std::{
-    fmt::Debug,
-    ops::{Range, RangeFrom, RangeTo},
+use {
+    serde::{Deserialize, Serialize},
+    std::{
+        fmt::Debug,
+        ops::{Range, RangeFrom, RangeTo},
+    },
 };
 
 mod merge;
@@ -12,7 +15,7 @@ pub use merge::*;
 ///
 /// If `start >= end`, the range is considered wrapping and is equivalent to
 /// covering two ranges: `(..end)` and `(start..)`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeyRange<Idx> {
     pub start: Idx,
     pub end: Idx,
